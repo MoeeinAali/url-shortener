@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: shortener
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  nats:
+    image: nats:2
+    ports:
+      - "4222:4222"
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - redis
+      - nats
+
+  projector:
+    build: .
+    command: [ "./projector" ]
+    depends_on:
+      - redis
+      - nats
