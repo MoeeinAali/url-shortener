@@ -40,34 +40,51 @@ Using distinct write/read databases is useful in CQRS systems for these reasons:
 
 Tradeoff: read models are usually **eventually consistent** (updates may appear with slight delay).
 
-## Architecture Diagram (Mermaid)
+## Architecture Diagram
 
 ```mermaid
-flowchart LR
-  Client[Client] -->|POST /links\nPOST /links/:short/disable| API[API Service]
-  Client -->|GET /:short\nGET /links/:short/stats| API
+flowchart TB
+  Client[Client]
 
-  subgraph Command Side
-    API --> CH[Command Handler]
-    CH --> CS[Command Service]
-    CS --> WR[Write Repository]
-    WR --> PG[(PostgreSQL - Write DB)]
+  subgraph API_LAYER[API Service]
+    API[HTTP Router]
+    CH[Command Handler]
+    QH[Query Handler]
+    CS[Command Service]
+    QS[Query Service]
+    WRepo[Write Repository]
+    RRepo[Read Repository]
+
+    API --> CH
+    API --> QH
+    CH --> CS
+    QH --> QS
+    CS --> WRepo
+    QS --> RRepo
   end
 
-  subgraph Query Side
-    API --> QH[Query Handler]
-    QH --> QS[Query Service]
-    QS --> RR[Read Repository]
-    RR --> REDIS[(Redis - Read DB)]
+  subgraph INFRA[Infrastructure]
+    PG[(PostgreSQL)]
+    REDIS[(Redis)]
+    NATS[(NATS)]
   end
 
-  QS -->|Publish link.clicked| NATS[(NATS)]
-
-  subgraph Projection Worker
-    NATS --> PRJ[Projector Service]
-    PRJ --> RR2[Read Repository]
-    RR2 --> REDIS
+  subgraph PROJECTOR[Projector Service]
+    PRJ[Link Projector]
+    PRJ_REPO[Read Repository]
+    PRJ --> PRJ_REPO
   end
+
+  Client -->|HTTP| API
+  WRepo --> PG
+  RRepo --> REDIS
+
+  CS -->|publish link.created\npublish link.disabled| NATS
+  QS -->|publish link.clicked| NATS
+
+  PG -->|startup bootstrap| PRJ
+  NATS -->|subscribe events| PRJ
+  PRJ_REPO --> REDIS
 ```
 
 ## Repository Structure
@@ -154,8 +171,18 @@ Base URL: `http://localhost:8080`
 
 ## Event Flow
 
-- **Published subject:** `link.clicked`
-- **Payload:**
+- **Published subjects:**
+  - `link.created`
+  - `link.disabled`
+  - `link.clicked`
+- **Payload examples:**
+
+```json
+{
+  "short_code": "Ab12Cd",
+  "long_url": "https://example.com/some/long/path"
+}
+```
 
 ```json
 {
@@ -164,7 +191,11 @@ Base URL: `http://localhost:8080`
 ```
 
 - **Subscriber:** projector service
-- **Projection update:** increment `clicks:<short_code>` in Redis
+- **Projection updates in Redis:**
+  - on `link.created`: set `link:<short_code>` => `long_url`
+  - on `link.disabled`: remove `link:<short_code>`
+  - on `link.clicked`: increment `clicks:<short_code>`
+- **Startup sync:** projector bootstraps links from PostgreSQL to Redis at startup.
 
 ## Running Locally
 
@@ -208,9 +239,10 @@ For production, move these values to environment variables or a secret manager.
 
 ## Notes on Current Implementation
 
-- The projector currently subscribes to `link.clicked` and updates click counters in Redis.
+- The projector subscribes to `link.created`, `link.disabled`, and `link.clicked`.
+- The projector also performs a startup bootstrap from PostgreSQL to Redis.
 - Query endpoints read from Redis, so data must exist in the read model for redirects/stats.
-- If you extend this project, consider publishing and projecting additional events (for example link-created / link-disabled) to keep Redis fully synchronized with PostgreSQL.
+- Write/read synchronization is eventually consistent because projections are updated asynchronously via NATS.
 
 ## CQRS Summary
 
