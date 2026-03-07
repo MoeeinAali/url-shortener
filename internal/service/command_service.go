@@ -24,7 +24,7 @@ func NewCommandService(repo *repository.LinkRepository, n *messaging.Client, log
 	}
 }
 
-func (s *CommandService) createLink(ctx context.Context, url string) (*domain.Link, error) {
+func (s *CommandService) CreateLink(ctx context.Context, url string) (*domain.Link, error) {
 	short := shortener.Generate()
 	link := domain.NewLink(short, url)
 

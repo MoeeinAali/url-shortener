@@ -3,6 +3,7 @@ package main
 import (
 	"url-shortener/internal/config"
 	"url-shortener/internal/db"
+	"url-shortener/internal/handlers"
 	"url-shortener/internal/logger"
 	"url-shortener/internal/messaging"
 	"url-shortener/internal/repository"
@@ -37,10 +38,22 @@ func main() {
 	commandService := service.NewCommandService(writeRepo, nats, log)
 	queryService := service.NewQueryService(readRepo, nats, log)
 
-	_ = commandService
-	_ = queryService
+	commandHandler := handlers.NewCommandHandler(commandService)
+	queryHandler := handlers.NewQueryHandler(queryService)
 
 	r := gin.Default()
 
-	r.Run(":8080")
+	// command routes
+	r.POST("/links", commandHandler.CreateLink)
+	r.POST("/links/:short/disable", commandHandler.DisableLink)
+
+	// query routes
+	r.GET("/:short", queryHandler.Redirect)
+	r.GET("/links/:short/stats", queryHandler.Stats)
+
+	err = r.Run(":8080")
+	if err != nil {
+		panic(err)
+		return
+	}
 }
