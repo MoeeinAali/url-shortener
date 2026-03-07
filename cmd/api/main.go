@@ -10,6 +10,7 @@ import (
 	"url-shortener/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -23,6 +24,10 @@ func main() {
 	pg, err := db.NewPostgres(cfg.PostgresDSN)
 	if err != nil {
 		panic(err)
+	}
+	err = db.RunMigrations(pg)
+	if err != nil {
+		log.Fatal("migration failed", zap.Error(err))
 	}
 
 	redis := db.NewRedis(cfg.RedisAddr)
