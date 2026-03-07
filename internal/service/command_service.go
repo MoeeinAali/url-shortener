@@ -31,6 +31,15 @@ func (s *CommandService) CreateLink(ctx context.Context, url string) (*domain.Li
 	err := s.repo.Create(ctx, link)
 	if err != nil {
 		s.logger.Error("create link failed", zap.Error(err))
+		return nil, err
+	}
+
+	err = s.nats.Publish("link.created", domain.LinkCreatedEvent{
+		ShortCode: short,
+		LongURL:   url,
+	})
+	if err != nil {
+		s.logger.Warn("publish link.created failed", zap.Error(err), zap.String("short", short))
 	}
 
 	s.logger.Info("create link successfully", zap.String("short", short))
@@ -39,5 +48,15 @@ func (s *CommandService) CreateLink(ctx context.Context, url string) (*domain.Li
 }
 
 func (s *CommandService) DisableLink(cta context.Context, short string) error {
-	return s.repo.Disable(cta, short)
+	err := s.repo.Disable(cta, short)
+	if err != nil {
+		return err
+	}
+
+	err = s.nats.Publish("link.disabled", domain.LinkDisabledEvent{ShortCode: short})
+	if err != nil {
+		s.logger.Warn("publish link.disabled failed", zap.Error(err), zap.String("short", short))
+	}
+
+	return nil
 }

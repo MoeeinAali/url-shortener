@@ -18,6 +18,10 @@ func (r *ReadRepository) SaveLink(ctx context.Context, short string, long string
 	return r.rdb.Set(ctx, "link:"+short, long, 0).Err()
 }
 
+func (r *ReadRepository) DeleteLink(ctx context.Context, short string) error {
+	return r.rdb.Del(ctx, "link:"+short).Err()
+}
+
 func (r *ReadRepository) GetLink(ctx context.Context, short string) (string, error) {
 	return r.rdb.Get(ctx, "link:"+short).Result()
 }
