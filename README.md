@@ -107,26 +107,26 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor C as Client
-    participant A as api (Query)
+    participant C as Client
+    participant Q as api (Query)
     participant R as Redis (Read DB)
     participant O as Outbox (Postgres)
     participant L as relay
     participant J as JetStream
     participant P as projector
+    participant A as Analytics (Postgres)
 
-    C->>A: GET /{short}
-    A->>R: GET link:{short}
-    R-->>A: long URL
-    A->>O: INSERT LinkClicked (durable)
-    A-->>C: 302 Redirect
-    Note over A,C: hot path stays fast; counting is async
+    C->>Q: GET /{short}
+    Q->>R: GET link:{short}
+    R-->>Q: longURL
+    Q->>O: INSERT LinkClicked (پایدار)
+    Q-->>C: 302 Redirect (فوری)
+    Note over Q,C: مسیر داغ سریع است؛ شمارش async است
     L->>O: poll unpublished
     L->>J: publish LinkClicked
     J->>P: deliver
-    P->>P: idempotent increment (dedup by event id)
-    P->>R: SET clicks:{short}
+    P->>A: idempotent increment → total
+    P->>R: SET clicks:{short} = total
 ```
 
 ## 🧱 Project structure (Hexagonal / Onion)
