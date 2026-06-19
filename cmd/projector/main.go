@@ -1,14 +1,23 @@
+// Command projector consumes domain events from JetStream and maintains the read
+// model (the Projector/Consumer of the CQRS architecture).
 package main
 
 import (
 	"context"
-	"url-shortener/internal/config"
-	"url-shortener/internal/db"
-	"url-shortener/internal/logger"
-	"url-shortener/internal/messaging"
-	"url-shortener/internal/projector"
-	"url-shortener/internal/repository"
+	"os/signal"
+	"syscall"
+
+	"go.uber.org/zap"
+
+	"url-shortener/internal/infrastructure/config"
+	"url-shortener/internal/infrastructure/logger"
+	"url-shortener/internal/infrastructure/messaging/jetstream"
+	"url-shortener/internal/infrastructure/persistence/postgres"
+	"url-shortener/internal/infrastructure/persistence/redis"
+	"url-shortener/internal/infrastructure/projector"
 )
+
+const durableConsumerName = "link-projector"
 
 func main() {
 	cfg := config.Load()
@@ -17,32 +26,49 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer func() { _ = log.Sync() }()
 
-	pg, err := db.NewPostgres(cfg.PostgresDSN)
+	db, err := postgres.Open(cfg.PostgresDSN)
 	if err != nil {
-		panic(err)
+		log.Fatal("connect postgres", zap.Error(err))
+	}
+	if err := postgres.AutoMigrate(db); err != nil {
+		log.Fatal("migrate postgres", zap.Error(err))
 	}
 
-	redis := db.NewRedis(cfg.RedisAddr)
+	rdb := redis.Open(cfg.RedisAddr, cfg.RedisPassword)
+	defer func() { _ = rdb.Close() }()
 
-	nats, err := messaging.New(cfg.NatsURL)
+	js, err := jetstream.Connect(cfg.NatsURL)
 	if err != nil {
-		panic(err)
+		log.Fatal("connect jetstream", zap.Error(err))
+	}
+	defer js.Close()
+	if err := js.EnsureStream(); err != nil {
+		log.Fatal("ensure stream", zap.Error(err))
 	}
 
-	readRepo := repository.NewReadRepository(redis)
-	writeRepo := repository.NewLinkRepository(pg)
+	readModel := redis.NewReadModel(rdb)
+	analytics := postgres.NewAnalyticsStore(db)
+	linkRepo := postgres.NewLinkRepository(db)
 
-	p := projector.NewLinkProjector(readRepo, writeRepo, log)
+	p := projector.New(readModel, analytics, linkRepo, log)
 
-	err = p.Bootstrap(context.Background())
-	if err != nil {
-		log.Warn("bootstrap read model failed")
+	// Rebuild the read model from the durable write side before consuming.
+	if err := p.Bootstrap(context.Background()); err != nil {
+		log.Warn("read model bootstrap failed", zap.Error(err))
 	}
 
-	nats.Subscribe("link.created", p.HandleLinkCreated)
-	nats.Subscribe("link.disabled", p.HandleLinkDisabled)
-	nats.Subscribe("link.clicked", p.HandleClick)
+	sub, err := js.Subscribe(durableConsumerName, p.Handle)
+	if err != nil {
+		log.Fatal("subscribe jetstream", zap.Error(err))
+	}
+	defer func() { _ = sub.Unsubscribe() }()
 
-	select {}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("projector started")
+	<-ctx.Done()
+	log.Info("projector stopped")
 }

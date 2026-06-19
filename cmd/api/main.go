@@ -1,16 +1,25 @@
+// Command api runs the REST API: both the command (write) and query (read) sides
+// of the CQRS system.
 package main
 
 import (
-	"url-shortener/internal/config"
-	"url-shortener/internal/db"
-	"url-shortener/internal/handlers"
-	"url-shortener/internal/logger"
-	"url-shortener/internal/messaging"
-	"url-shortener/internal/repository"
-	"url-shortener/internal/service"
+	"context"
+	"errors"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+
+	"url-shortener/internal/application/command"
+	"url-shortener/internal/application/query"
+	"url-shortener/internal/domain/link"
+	"url-shortener/internal/infrastructure/config"
+	"url-shortener/internal/infrastructure/logger"
+	"url-shortener/internal/infrastructure/persistence/postgres"
+	"url-shortener/internal/infrastructure/persistence/redis"
+	transport "url-shortener/internal/interfaces/http"
 )
 
 func main() {
@@ -20,45 +29,56 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer func() { _ = log.Sync() }()
 
-	pg, err := db.NewPostgres(cfg.PostgresDSN)
+	// Write store (Postgres) + migrations.
+	db, err := postgres.Open(cfg.PostgresDSN)
 	if err != nil {
-		panic(err)
+		log.Fatal("connect postgres", zap.Error(err))
 	}
-	err = db.RunMigrations(pg)
-	if err != nil {
-		log.Fatal("migration failed", zap.Error(err))
-	}
-
-	redis := db.NewRedis(cfg.RedisAddr)
-
-	nats, err := messaging.New(cfg.NatsURL)
-	if err != nil {
-		panic(err)
+	if err := postgres.AutoMigrate(db); err != nil {
+		log.Fatal("migrate postgres", zap.Error(err))
 	}
 
-	writeRepo := repository.NewLinkRepository(pg)
-	readRepo := repository.NewReadRepository(redis)
+	// Read store (Redis).
+	rdb := redis.Open(cfg.RedisAddr, cfg.RedisPassword)
+	defer func() { _ = rdb.Close() }()
 
-	commandService := service.NewCommandService(writeRepo, nats, log)
-	queryService := service.NewQueryService(readRepo, nats, log)
+	// Adapters.
+	linkRepo := postgres.NewLinkRepository(db)
+	outbox := postgres.NewOutboxStore(db)
+	readModel := redis.NewReadModel(rdb)
 
-	commandHandler := handlers.NewCommandHandler(commandService)
-	queryHandler := handlers.NewQueryHandler(queryService)
+	// Use cases.
+	createHandler := command.NewCreateLinkHandler(linkRepo, link.Generator{}, log)
+	disableHandler := command.NewDisableLinkHandler(linkRepo, log)
+	recordClickHandler := command.NewRecordClickHandler(outbox)
+	redirectHandler := query.NewRedirectHandler(readModel, recordClickHandler, log)
+	statsHandler := query.NewGetStatsHandler(readModel)
 
-	r := gin.Default()
+	// Transport.
+	cmdHandler := transport.NewCommandHandler(createHandler, disableHandler, cfg.BaseURL)
+	qryHandler := transport.NewQueryHandler(redirectHandler, statsHandler)
+	router := transport.NewRouter(cmdHandler, qryHandler)
 
-	// command routes
-	r.POST("/links", commandHandler.CreateLink)
-	r.POST("/links/:short/disable", commandHandler.DisableLink)
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: router}
 
-	// query routes
-	r.GET("/:short", queryHandler.Redirect)
-	r.GET("/links/:short/stats", queryHandler.Stats)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	err = r.Run(":8080")
-	if err != nil {
-		panic(err)
-		return
+	go func() {
+		log.Info("api listening", zap.String("addr", cfg.HTTPAddr))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("http server", zap.Error(err))
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info("api shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("graceful shutdown failed", zap.Error(err))
 	}
 }
